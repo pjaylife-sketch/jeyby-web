@@ -88,31 +88,81 @@
     if (send) vipSend(send);
   });
 
-  /* Poptávkový formulář – otevře e-mail s vyplněnými údaji */
+  /* Tlačítko „Chci tento balíček“ předvyplní balíček ve formuláři */
+  var chosenPackage = '';
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest('a');
+    if (!a || !/Chci tento balíček|Chci být hlavní partner/.test(a.textContent)) return;
+    var card = a.parentElement, nameEl = card && card.querySelector('div[style*="Anton"]');
+    chosenPackage = nameEl ? nameEl.textContent.trim().replace(/\s+/g, ' ') : '';
+    var pkg = document.getElementById('m-f-pkg');
+    if (pkg && a.closest('.m-root')) {
+      [].forEach.call(pkg.options, function (o) { if (o.text.toLowerCase() === chosenPackage.toLowerCase()) pkg.value = o.text; });
+    }
+  });
+
+  /* Poptávkový formulář → Cloudflare Worker → Google Tabulka + e-maily přes Resend.
+     Dokud není BOOKING_ENDPOINT vyplněný, formulář otevře e-mail jako dřív. */
+  var BOOKING_ENDPOINT = window.JEYBY_BOOKING_ENDPOINT || '';
+
+  function val(f, id) { var el = f.querySelector('#' + id) || f.querySelector('#m-' + id); return el ? (el.value || '').trim() : ''; }
+  function setSent(f, text) {
+    f.querySelectorAll('[data-if="notSent"]').forEach(function (el) { el.classList.add('off'); });
+    f.querySelectorAll('[data-if="sent"]').forEach(function (el) {
+      el.classList.remove('off');
+      var box = el.querySelector('[role="status"]'); if (box && text) box.textContent = text;
+    });
+  }
+
   document.querySelectorAll('form[data-form]').forEach(function (f) {
+    var hp = document.createElement('input');                 // skryté pole proti botům
+    hp.type = 'text'; hp.name = 'web'; hp.tabIndex = -1; hp.autocomplete = 'off';
+    hp.setAttribute('aria-hidden', 'true'); hp.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;opacity:0';
+    f.appendChild(hp);
+
     f.addEventListener('submit', function (e) {
       e.preventDefault();
-      var lines = [], typ = '', datum = '', mail = '', tel = '';
-      f.querySelectorAll('input, select, textarea').forEach(function (el) {
-        var lab = f.querySelector('label[for="' + el.id + '"]');
-        var name = lab ? lab.textContent.trim() : el.id;
-        var val = (el.value || '').trim();
-        if (/typ akce/i.test(name)) typ = val;
-        if (/datum/i.test(name)) datum = val;
-        if (el.type === 'email') mail = val;
-        if (el.type === 'tel') tel = val;
-        if (val) lines.push(name + ': ' + val);
-      });
-      if (!mail && !tel) {
-        var m = f.querySelector('input[type="email"]');
-        if (m) { m.focus(); m.setCustomValidity('Vyplňte prosím e-mail nebo telefon.'); m.reportValidity(); m.setCustomValidity(''); }
+      var mobile = !!f.closest('.m-root');
+      var d = {
+        jmeno: val(f, 'f-name'), firma: val(f, 'f-org'), email: val(f, 'f-mail'), telefon: val(f, 'f-tel'),
+        typ: val(f, 'f-type'), balicek: val(f, 'f-pkg'), datum: val(f, 'f-date'), misto: val(f, 'f-place'),
+        pocet: val(f, 'f-guests'), zprava: val(f, 'f-msg'), zdroj: (mobile ? 'web – mobil' : 'web – desktop'), web: hp.value
+      };
+      if (!d.balicek || d.balicek === 'Zatím nevím') d.balicek = chosenPackage || (/^VIP na míru/.test(d.zprava) ? 'VIP na míru' : d.balicek);
+      var mailEl = f.querySelector('input[type="email"]');
+      if (!d.jmeno) {
+        var n = f.querySelector('input[autocomplete="name"], input[id$="f-name"]');
+        if (n) { n.focus(); n.setCustomValidity('Vyplňte prosím jméno.'); n.reportValidity(); n.setCustomValidity(''); }
         return;
       }
-      var subject = 'Poptávka vystoupení' + (typ ? ' – ' + typ : '') + (datum ? ' – ' + datum : '');
-      window.location.href = 'mailto:' + BOOKING_EMAIL + '?subject=' + encodeURIComponent(subject) +
-        '&body=' + encodeURIComponent(lines.join('\n'));
-      f.querySelectorAll('[data-if="notSent"]').forEach(function (el) { el.classList.add('off'); });
-      f.querySelectorAll('[data-if="sent"]').forEach(function (el) { el.classList.remove('off'); });
+      if (!d.email && !d.telefon) {
+        if (mailEl) { mailEl.focus(); mailEl.setCustomValidity('Vyplňte prosím e-mail nebo telefon.'); mailEl.reportValidity(); mailEl.setCustomValidity(''); }
+        return;
+      }
+      if (d.email && mailEl && !mailEl.checkValidity()) { mailEl.reportValidity(); return; }
+
+      function mailtoFallback() {
+        var lines = [['Jméno', d.jmeno], ['Firma / pořadatel', d.firma], ['E-mail', d.email], ['Telefon', d.telefon], ['Typ akce', d.typ],
+          ['Balíček', d.balicek], ['Datum akce', d.datum], ['Místo konání', d.misto], ['Počet hostů', d.pocet], ['Zpráva', d.zprava]]
+          .filter(function (x) { return x[1]; }).map(function (x) { return x[0] + ': ' + x[1]; });
+        var subject = 'Poptávka vystoupení' + (d.typ ? ' – ' + d.typ : '') + (d.datum ? ' – ' + d.datum : '');
+        window.location.href = 'mailto:' + BOOKING_EMAIL + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(lines.join('\n'));
+        setSent(f, 'Otevřeli jsme vám e-mail s poptávkou – stačí ho odeslat.');
+      }
+      if (!BOOKING_ENDPOINT) { mailtoFallback(); return; }
+
+      var btn = f.querySelector('button[type="submit"]'), label = btn ? btn.innerHTML : '';
+      if (btn) { btn.disabled = true; btn.style.opacity = '0.7'; btn.textContent = 'Odesílám…'; }
+      fetch(BOOKING_ENDPOINT, { method: 'POST', body: new URLSearchParams(d), headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (!res || !res.success) throw new Error(res && res.error);
+          setSent(f, 'Díky! Poptávku máme' + (d.email ? ' a potvrzení jsme vám poslali na e-mail.' : '. Brzy se vám ozveme.'));
+        })
+        .catch(function () {
+          if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.innerHTML = label; }
+          mailtoFallback();
+        });
     });
   });
 })();
